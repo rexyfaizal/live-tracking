@@ -5,6 +5,19 @@ Sistem live tracking sederhana untuk 10-15 orang:
 - **Dashboard** admin dengan peta OpenStreetMap
 - **PWA** di HP untuk share lokasi live
 
+## Deploy Linux (Docker)
+
+Backend + Dashboard saja. Panduan lengkap: **[DEPLOY_DOCKER.md](./DEPLOY_DOCKER.md)**
+
+```bash
+cp .env.docker.example .env.docker
+docker compose up -d --build
+```
+
+- Dashboard: `http://10.5.0.107:6600`
+- Backend: `http://10.5.0.107:4001`
+- Download APK: `http://10.5.0.107:4001/download`
+
 ## Cara Menjalankan
 
 ### 1. Install dependency

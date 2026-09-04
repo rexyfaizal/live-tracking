@@ -1,0 +1,29 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: lt-backend
+    ports:
+      - "4001:4001"
+    env_file:
+      - .env.docker
+    environment:
+      PORT: 4001
+      APK_PATH: /app/pwa-tracker/release/live-tracker.apk
+    volumes:
+      - ./backend/data:/app/backend/data
+      - ./backend/public:/app/backend/public:ro
+      - ./pwa-tracker/release:/app/pwa-tracker/release:ro
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    container_name: lt-dashboard
+    ports:
+      - "6600:80"
+    depends_on:
+      - backend
+    restart: unless-stopped

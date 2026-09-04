@@ -16,7 +16,9 @@ dotenv.config();
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const publicDir = path.resolve(__dirname, '../public');
-const apkPath = path.resolve(__dirname, '../../pwa-tracker/release/live-tracker.apk');
+const apkPath = process.env.APK_PATH
+  ? path.resolve(process.env.APK_PATH)
+  : path.resolve(__dirname, '../../pwa-tracker/release/live-tracker.apk');
 
 const app = express();
 const server = http.createServer(app);
