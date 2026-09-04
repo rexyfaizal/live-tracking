@@ -1,0 +1,15 @@
+{
+  "name": "live-tracking",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "install:all": "npm install && cd backend && npm install && cd ../dashboard && npm install && cd ../pwa-tracker && npm install",
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:dashboard\" \"npm run dev:pwa\"",
+    "dev:backend": "cd backend && npm run dev",
+    "dev:dashboard": "cd dashboard && npm run dev",
+    "dev:pwa": "cd pwa-tracker && npm run dev"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

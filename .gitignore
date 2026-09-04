@@ -1,0 +1,29 @@
+﻿# Node / frontend
+**/node_modules/
+**/dist/
+**/.vite/
+**/.cache/
+
+# Environment / secret
+**/.env
+**/.env.*
+!**/.env.example
+
+# Logs
+*.log
+logs/
+
+# Build
+*.exe
+*.out
+
+# IDE
+.vscode/
+.idea/
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# Misc
+.DS_Store
