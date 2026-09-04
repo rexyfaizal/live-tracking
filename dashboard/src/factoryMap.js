@@ -1,5 +1,5 @@
 export const STORAGE_KEY = 'live_tracking_factory_bounds';
-export const FLOORPLAN_URL = '/maps/factoryfloor.png';
+export const FLOORPLAN_URL = '/maps/factory-floor.svg';
 export const IMAGE_SIZE = { width: 1024, height: 576 };
 
 /** Posisi ruang Robotic di denah (0-1, dari kiri/atas). */

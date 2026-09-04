@@ -1,7 +1,7 @@
 import { CapacitorHttp, registerPlugin } from '@capacitor/core';
 import { Geolocation } from '@capacitor/geolocation';
 import { AuthExpiredError, isAuthFailure, isTokenExpired } from '../auth.js';
-import { getApiUrl, isNativeApp } from '../config.js';
+import { getActiveNetworkLabel, getApiUrl, isNativeApp, resolveApiUrl } from '../config.js';
 
 const BackgroundGeolocation = registerPlugin('BackgroundGeolocation');
 
@@ -153,49 +153,67 @@ export function createLocationService({ token, onUpdate, onStatus, onError }) {
   }
 
   async function postJson(path, body) {
-    const url = `${getApiUrl()}${path}`;
+    await resolveApiUrl();
 
-    // Native HTTP tetap jalan saat app di background (fetch WebView sering di-throttle)
-    if (isNativeApp()) {
-      const response = await CapacitorHttp.request({
-        url,
-        method: body === undefined ? 'POST' : 'POST',
+    async function requestOnce(baseUrl) {
+      const url = `${baseUrl}${path}`;
+
+      // Native HTTP tetap jalan saat app di background (fetch WebView sering di-throttle)
+      if (isNativeApp()) {
+        const response = await CapacitorHttp.request({
+          url,
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          data: body ?? {},
+          connectTimeout: 15000,
+          readTimeout: 15000,
+        });
+
+        const data =
+          typeof response.data === 'string' ? JSON.parse(response.data || '{}') : response.data;
+        if (response.status === 401) {
+          throw new AuthExpiredError(data?.error || 'Sesi berakhir. Silakan login ulang.');
+        }
+        if (response.status < 200 || response.status >= 300) {
+          throw new Error(data?.error || `HTTP ${response.status}`);
+        }
+        return data;
+      }
+
+      const response = await fetch(url, {
+        method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
         },
-        data: body ?? {},
-        connectTimeout: 15000,
-        readTimeout: 15000,
+        body: JSON.stringify(body ?? {}),
       });
 
-      const data = typeof response.data === 'string' ? JSON.parse(response.data || '{}') : response.data;
+      const data = await response.json().catch(() => ({}));
       if (response.status === 401) {
-        throw new AuthExpiredError(data?.error || 'Sesi berakhir. Silakan login ulang.');
+        throw new AuthExpiredError(data.error || 'Sesi berakhir. Silakan login ulang.');
       }
-      if (response.status < 200 || response.status >= 300) {
-        throw new Error(data?.error || `HTTP ${response.status}`);
+      if (!response.ok) {
+        throw new Error(data.error || 'Gagal mengirim lokasi');
       }
       return data;
     }
 
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: body ? JSON.stringify(body) : undefined,
-    });
+    try {
+      return await requestOnce(getApiUrl());
+    } catch (error) {
+      if (error instanceof AuthExpiredError || isAuthFailure(error)) {
+        throw error;
+      }
 
-    const data = await response.json();
-    if (response.status === 401) {
-      throw new AuthExpiredError(data.error || 'Sesi berakhir. Silakan login ulang.');
+      // Gagal di jalur aktif → cek ulang lokal/publik lalu coba sekali lagi
+      await resolveApiUrl({ force: true });
+      setStatus(`Jalur: ${getActiveNetworkLabel()} — mencoba kirim ulang...`);
+      return requestOnce(getApiUrl());
     }
-    if (!response.ok) {
-      throw new Error(data.error || 'Gagal mengirim lokasi');
-    }
-    return data;
   }
 
   async function sendLocationSafe(current, { force = false, keepalive = false } = {}) {

@@ -1,6 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue';
-import { login } from './api.js';
+import { login, getActiveNetworkLabel, resolveApiUrl } from './api.js';
 import { isAuthFailure, isTokenExpired } from './auth.js';
 import { createLocationService, isSharingEnabled } from './services/locationService.js';
 
@@ -10,6 +10,7 @@ const username = ref('');
 const password = ref('');
 const error = ref('');
 const status = ref('Siap');
+const networkLabel = ref('-');
 const sharing = ref(isSharingEnabled());
 const lastPosition = ref(null);
 const loading = ref(false);
@@ -37,6 +38,7 @@ function initLocationService() {
     },
     onStatus: (message) => {
       status.value = message;
+      networkLabel.value = getActiveNetworkLabel();
       sharing.value = locationService?.isSharing() ?? false;
     },
     onError: (err, meta = {}) => {
@@ -76,11 +78,17 @@ function stopSessionWatch() {
   }
 }
 
+async function refreshNetwork() {
+  await resolveApiUrl({ force: true });
+  networkLabel.value = getActiveNetworkLabel();
+}
+
 async function handleLogin() {
   loading.value = true;
   error.value = '';
 
   try {
+    await refreshNetwork();
     const payload = await login(username.value, password.value);
     if (payload.user.role !== 'tracker') {
       throw new Error('Akun ini bukan akun tracker');
@@ -140,6 +148,8 @@ async function logout({ silent = false } = {}) {
 }
 
 onMounted(async () => {
+  await refreshNetwork();
+
   if (!isLoggedIn.value) return;
 
   if (isTokenExpired(token.value)) {
@@ -218,6 +228,7 @@ onUnmounted(() => {
         <div>
           <strong>{{ sharing ? 'Tracking aktif (otomatis)' : 'Tracking nonaktif' }}</strong>
           <p>{{ status }}</p>
+          <p class="net">Server: {{ networkLabel }}</p>
         </div>
       </div>
 
@@ -348,6 +359,12 @@ button.ghost {
 .dot.active {
   background: #22c55e;
   box-shadow: 0 0 0 6px rgba(34, 197, 94, 0.15);
+}
+
+.net {
+  margin-top: 0.25rem !important;
+  font-size: 0.8rem;
+  color: #7dd3fc !important;
 }
 
 .coords {

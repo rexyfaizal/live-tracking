@@ -79,9 +79,45 @@ app.get('/health', (_req, res) => {
   res.json({ status: 'ok' });
 });
 
+function formatApkUpdatedAt(date) {
+  return new Intl.DateTimeFormat('id-ID', {
+    timeZone: 'Asia/Jakarta',
+    weekday: 'long',
+    day: '2-digit',
+    month: 'long',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(date) + ' WIB';
+}
+
+function formatFileSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '-';
+  const mb = bytes / (1024 * 1024);
+  return `${mb.toFixed(2)} MB`;
+}
+
 // Halaman unduh APK (model htdocs) — HP/tablet buka di browser
 app.get('/download', (_req, res) => {
-  res.sendFile(path.join(publicDir, 'download.html'));
+  const templatePath = path.join(publicDir, 'download.html');
+  let html = fs.readFileSync(templatePath, 'utf8');
+
+  let updatedAt = 'APK belum tersedia';
+  let fileSize = '-';
+
+  if (fs.existsSync(apkPath)) {
+    const stat = fs.statSync(apkPath);
+    updatedAt = formatApkUpdatedAt(stat.mtime);
+    fileSize = formatFileSize(stat.size);
+  }
+
+  html = html
+    .replaceAll('{{UPDATED_AT}}', updatedAt)
+    .replaceAll('{{FILE_SIZE}}', fileSize);
+
+  res.type('html').send(html);
 });
 
 app.get('/download/live-tracker.apk', (req, res) => {

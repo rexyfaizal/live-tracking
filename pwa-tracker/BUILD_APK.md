@@ -44,23 +44,22 @@ Jika tracking / auto-buka gagal (HP Xiaomi/Oppo/Vivo):
 
 ## URL backend (penting)
 
-APK dikonfigurasi mengarah ke:
+APK dikonfigurasi dual jaringan:
 
 ```
-http://10.5.0.8:4001
+Lokal  : http://10.5.0.107:4001   (WiFi pabrik — diprioritaskan)
+Publik : http://103.24.148.59:4001 (paket data / luar — cadangan)
 ```
 
-Pastikan:
-- Backend jalan di PC: `cd backend && npm run dev`
-- HP dan PC **satu WiFi**
-- IP PC masih `10.5.0.8` (cek dengan `ipconfig`)
+App cek `/health` lokal dulu; jika gagal otomatis pakai publik.
 
 ### Ganti IP backend
 
 Edit `pwa-tracker/.env.production`:
 
 ```
-VITE_API_URL=http://IP-BARU-ANDA:4001
+VITE_API_URL_LOCAL=http://IP-LOKAL:4001
+VITE_API_URL_PUBLIC=http://IP-PUBLIK:4001
 ```
 
 Lalu build ulang:
