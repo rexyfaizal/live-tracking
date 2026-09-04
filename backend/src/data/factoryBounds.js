@@ -6,6 +6,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const dataDir = path.resolve(__dirname, '../../data');
 const dataFile = path.join(dataDir, 'factory-bounds.json');
 
+/** Harus selaras dengan dashboard FLOORPLANS.id */
+const KNOWN_OVERLAY_IDS = ['gedung-utama', 'gm1', 'gm2', 'gm3'];
+const DEFAULT_OVERLAY_ID = 'gedung-utama';
+
 function ensureDir() {
   if (!fs.existsSync(dataDir)) {
     fs.mkdirSync(dataDir, { recursive: true });
@@ -35,25 +39,43 @@ function normalizeBounds(data) {
   };
 }
 
+/** Format lama (satu objek bounds) → map per id denah. */
+export function normalizeOverlaysMap(data) {
+  if (!data) return {};
+
+  if (Number.isFinite(Number(data.south))) {
+    const single = normalizeBounds(data);
+    return single ? { [DEFAULT_OVERLAY_ID]: single } : {};
+  }
+
+  const raw = data.overlays && typeof data.overlays === 'object' ? data.overlays : data;
+  const out = {};
+  for (const id of KNOWN_OVERLAY_IDS) {
+    const bounds = normalizeBounds(raw[id]);
+    if (bounds) out[id] = bounds;
+  }
+  return out;
+}
+
 export function loadFactoryBounds() {
   try {
-    if (!fs.existsSync(dataFile)) return null;
+    if (!fs.existsSync(dataFile)) return {};
     const raw = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
-    return normalizeBounds(raw);
+    return normalizeOverlaysMap(raw);
   } catch {
-    return null;
+    return {};
   }
 }
 
 export function saveFactoryBounds(input) {
-  const bounds = normalizeBounds(input);
-  if (!bounds) {
+  const boundsMap = normalizeOverlaysMap(input);
+  if (Object.keys(boundsMap).length === 0) {
     throw new Error('Data kalibrasi tidak valid');
   }
 
   ensureDir();
-  fs.writeFileSync(dataFile, JSON.stringify(bounds, null, 2));
-  return bounds;
+  fs.writeFileSync(dataFile, JSON.stringify(boundsMap, null, 2));
+  return boundsMap;
 }
 
 export function clearFactoryBounds() {

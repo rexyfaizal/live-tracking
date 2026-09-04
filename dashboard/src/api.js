@@ -107,7 +107,8 @@ export async function fetchFactoryBounds() {
   if (!response.ok) {
     throw new Error(data.error || 'Gagal memuat kalibrasi denah');
   }
-  return data.bounds ?? null;
+  // Format baru: map id→bounds. Format lama (satu bounds) tetap didukung di normalizeOverlaysMap.
+  return data.bounds ?? {};
 }
 
 export async function saveFactoryBounds(token, bounds) {

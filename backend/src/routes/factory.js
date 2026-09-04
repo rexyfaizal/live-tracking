@@ -27,8 +27,8 @@ router.put('/', authMiddleware, requireRole('admin'), (req, res) => {
 router.delete('/', authMiddleware, requireRole('admin'), (_req, res) => {
   clearFactoryBounds();
   const io = req.app.get('io');
-  io.to('dashboard').emit('factory_bounds_updated', null);
-  return res.json({ success: true, bounds: null });
+  io.to('dashboard').emit('factory_bounds_updated', {});
+  return res.json({ success: true, bounds: {} });
 });
 
 export default router;

@@ -6,16 +6,19 @@ import {
   boundsFromMapView,
   boundsFromRobotics,
   boundsFromRotatedCorners,
-  clearBounds,
-  FLOORPLAN_URL,
-  loadBounds,
+  boundsNearReference,
+  DEFAULT_OVERLAY_ID,
+  FLOORPLANS,
+  getFloorplan,
+  loadBoundsMap,
+  normalizeOverlaysMap,
   normalizeRotation,
-  normalizeStoredBounds,
   overlayCenter,
   overlayCorners,
   rotatedLatLngs,
-  saveBounds,
+  saveBoundsMap,
   shiftBounds,
+  unionLatLngs,
 } from '../factoryMap.js';
 import { colorForTracker } from '../trackerColor.js';
 import {
@@ -53,6 +56,11 @@ const north = ref('');
 const east = ref('');
 const saveNote = ref('');
 const showCoords = ref(false);
+const activeOverlayId = ref(DEFAULT_OVERLAY_ID);
+const floorplans = FLOORPLANS;
+const overlayVisible = ref(
+  Object.fromEntries(FLOORPLANS.map((plan) => [plan.id, true])),
+);
 
 const defaultCenter = [-6.2, 106.816666];
 
@@ -65,7 +73,8 @@ let osmStreetLayer = null;
 let baseLayerControl = null;
 let baseLayerControlOnMap = false;
 
-let floorOverlay = null;
+/** Leaflet overlay per id denah */
+const floorOverlays = new Map();
 let swMarker = null;
 let neMarker = null;
 let moveMarker = null;
@@ -83,8 +92,8 @@ const BASE_STYLE_KEY = 'live_tracking_base_style';
 let floorViewBound = false;
 let saveViewTimer = null;
 let mapResizeObserver = null;
-/** Kalibrasi bersama dari server (utama). localStorage hanya cache. */
-let sharedBounds = null;
+/** Kalibrasi bersama dari server (utama). localStorage hanya cache. Map id → bounds. */
+let sharedBoundsMap = {};
 let serverSaveTimer = null;
 let applyingRemote = false;
 
@@ -153,20 +162,20 @@ function unbindFloorViewPersist() {
   floorViewBound = false;
 }
 
-function applyFloorView(bounds) {
+function applyFloorView() {
   map.invalidateSize();
   const saved = loadFloorView();
   if (saved) {
     map.setView([saved.lat, saved.lng], saved.zoom, { animate: false });
     return;
   }
-  fitToOverlay(bounds, { padding: [28, 28], maxZoom: 22, zoomBoost: 0 });
+  fitToAllOverlays({ padding: [28, 28], maxZoom: 22 });
 }
 
 function resetFloorView() {
   clearFloorView();
   if (!map) return;
-  applyFloorView(currentOverlayBounds());
+  applyFloorView();
 }
 
 function validLocations() {
@@ -209,46 +218,70 @@ function createMarkerIcon(location) {
   });
 }
 
-function cornerIcon(label) {
-  return L.divIcon({
-    className: '',
-    html: `<div class="calib-pin">${label}</div>`,
-    iconSize: [40, 28],
-    iconAnchor: [20, 14],
-  });
-}
-
-function currentOverlayBounds() {
-  if (sharedBounds) return sharedBounds;
-
-  const saved = loadBounds();
-  if (saved) {
-    sharedBounds = saved;
-    return saved;
-  }
-
+function defaultBoundsForId(overlayId) {
   const live = validLocations();
   if (live.length > 0) {
-    return boundsFromRobotics(live[0].lat, live[0].lng);
+    return boundsFromRobotics(live[0].lat, live[0].lng, overlayId);
   }
-
   if (map) {
     return boundsFromMapView(map);
   }
-
-  return boundsFromRobotics(defaultCenter[0], defaultCenter[1]);
+  return boundsFromRobotics(defaultCenter[0], defaultCenter[1], overlayId);
 }
 
-function applySharedBounds(bounds, { refreshView = true } = {}) {
-  const next = normalizeStoredBounds(bounds);
-  sharedBounds = next;
-  if (next) {
-    saveBounds(next);
-  } else {
-    clearBounds();
+function resolveBoundsForId(overlayId) {
+  const saved = sharedBoundsMap[overlayId];
+  if (saved) return saved;
+
+  if (overlayId !== DEFAULT_OVERLAY_ID) {
+    const ref =
+      sharedBoundsMap[DEFAULT_OVERLAY_ID] ||
+      Object.values(sharedBoundsMap)[0] ||
+      null;
+    const near = boundsNearReference(ref, overlayId);
+    if (near) return near;
   }
 
+  return defaultBoundsForId(overlayId);
+}
+
+function currentOverlayBounds() {
+  return resolveBoundsForId(activeOverlayId.value);
+}
+
+function visibleBoundsList() {
+  return FLOORPLANS.filter((plan) => overlayVisible.value[plan.id] !== false).map((plan) =>
+    resolveBoundsForId(plan.id),
+  );
+}
+
+function cacheBoundsMap() {
+  saveBoundsMap(sharedBoundsMap);
+}
+
+function softSyncCalibrateOverlays() {
+  if (!map || mapMode.value !== 'calibrate') return;
+  ensureAllOverlays();
+  applyOverlayVisual();
+  // Jangan ganggu drag/geser yang sedang berjalan
+  if (overlayDrag || moveDragStart) return;
+  const bounds = currentOverlayBounds();
+  writeInputs(bounds);
+  syncCalibHandles(bounds);
+}
+
+function applySharedBoundsMap(data, { refreshView = true } = {}) {
+  sharedBoundsMap = normalizeOverlaysMap(data);
+  cacheBoundsMap();
+
   if (!refreshView || !map || mapMode.value === 'osm') return;
+
+  // Mode kalibrasi: update denah saja, jangan fit ulang / rebind (itu yang terasa "refresh")
+  if (mapMode.value === 'calibrate') {
+    softSyncCalibrateOverlays();
+    return;
+  }
+
   applyMode();
 }
 
@@ -260,12 +293,12 @@ function showSaveNote(message) {
   }, 2500);
 }
 
-async function pushBoundsToServer(bounds, { notify = false } = {}) {
+async function pushBoundsToServer(boundsMap, { notify = false } = {}) {
   if (!props.isAdmin || !props.adminToken || applyingRemote) return;
   try {
-    const saved = await saveFactoryBoundsApi(props.adminToken, bounds);
-    sharedBounds = normalizeStoredBounds(saved) || bounds;
-    saveBounds(sharedBounds);
+    const saved = await saveFactoryBoundsApi(props.adminToken, boundsMap);
+    sharedBoundsMap = normalizeOverlaysMap(saved);
+    cacheBoundsMap();
     if (notify) {
       showSaveNote('Kalibrasi tersimpan untuk semua komputer');
     }
@@ -280,13 +313,14 @@ async function migrateLocalBoundsIfNeeded() {
   if (!props.isAdmin || !props.adminToken) return;
   try {
     const remote = await fetchFactoryBounds();
-    if (remote) {
-      applySharedBounds(remote, { refreshView: Boolean(map) });
+    const remoteMap = normalizeOverlaysMap(remote);
+    if (Object.keys(remoteMap).length > 0) {
+      applySharedBoundsMap(remoteMap, { refreshView: Boolean(map) });
       return;
     }
-    const local = loadBounds();
-    if (local) {
-      sharedBounds = local;
+    const local = loadBoundsMap();
+    if (Object.keys(local).length > 0) {
+      sharedBoundsMap = local;
       await saveFactoryBoundsApi(props.adminToken, local);
     }
   } catch {
@@ -297,14 +331,15 @@ async function migrateLocalBoundsIfNeeded() {
 async function bootstrapSharedBounds() {
   try {
     const remote = await fetchFactoryBounds();
-    if (remote) {
-      applySharedBounds(remote, { refreshView: false });
+    const remoteMap = normalizeOverlaysMap(remote);
+    if (Object.keys(remoteMap).length > 0) {
+      applySharedBoundsMap(remoteMap, { refreshView: false });
       return;
     }
 
-    const local = loadBounds();
-    sharedBounds = local;
-    if (local && props.isAdmin && props.adminToken) {
+    const local = loadBoundsMap();
+    sharedBoundsMap = local;
+    if (Object.keys(local).length > 0 && props.isAdmin && props.adminToken) {
       try {
         await saveFactoryBoundsApi(props.adminToken, local);
       } catch {
@@ -312,7 +347,7 @@ async function bootstrapSharedBounds() {
       }
     }
   } catch {
-    sharedBounds = loadBounds();
+    sharedBoundsMap = loadBoundsMap();
   }
 }
 
@@ -342,30 +377,62 @@ function readInputs() {
   return next;
 }
 
-function ensureOverlay(bounds) {
-  const corners = overlayCorners(bounds);
+function activeFloorOverlay() {
+  return floorOverlays.get(activeOverlayId.value) || null;
+}
 
-  if (floorOverlay) {
-    floorOverlay.reposition(corners.topLeft, corners.topRight, corners.bottomLeft);
-    return;
+function ensureOverlay(overlayId, bounds) {
+  const plan = getFloorplan(overlayId);
+  const corners = overlayCorners(bounds);
+  let layer = floorOverlays.get(overlayId);
+
+  if (layer) {
+    layer.reposition(corners.topLeft, corners.topRight, corners.bottomLeft);
+    return layer;
   }
 
-  floorOverlay = imageOverlayRotated(
-    FLOORPLAN_URL,
+  layer = imageOverlayRotated(
+    plan.url,
     corners.topLeft,
     corners.topRight,
     corners.bottomLeft,
     {
       opacity: overlayOpacity.value,
       interactive: false,
-      zIndex: 3,
+      zIndex: 3 + FLOORPLANS.findIndex((p) => p.id === overlayId),
     },
   );
+  floorOverlays.set(overlayId, layer);
+  return layer;
 }
 
-function removeOverlay() {
-  if (floorOverlay && map) {
-    map.removeLayer(floorOverlay);
+function ensureAllOverlays() {
+  for (const plan of FLOORPLANS) {
+    if (overlayVisible.value[plan.id] === false) {
+      const layer = floorOverlays.get(plan.id);
+      if (layer && map?.hasLayer(layer)) {
+        map.removeLayer(layer);
+      }
+      continue;
+    }
+    const bounds = resolveBoundsForId(plan.id);
+    const layer = ensureOverlay(plan.id, bounds);
+    if (map && !map.hasLayer(layer)) {
+      layer.addTo(map);
+    }
+  }
+}
+
+function removeOverlay(overlayId) {
+  const layer = floorOverlays.get(overlayId);
+  if (layer && map) {
+    map.removeLayer(layer);
+  }
+}
+
+function removeAllOverlays() {
+  for (const plan of FLOORPLANS) {
+    removeOverlay(plan.id);
   }
 }
 
@@ -392,7 +459,7 @@ function stopOverlayDrag() {
   L.DomEvent.off(document, 'touchend', onOverlayMouseUp);
   if (map) map.dragging.enable();
   if (mapMode.value === 'calibrate') {
-    floorOverlay?.setMoveable(true);
+    activeFloorOverlay()?.setMoveable(true);
   }
 }
 
@@ -407,7 +474,7 @@ function onOverlayMouseDown(e) {
     startLatLng: eventToLatLng(e),
   };
   map.dragging.disable();
-  const overlayEl = floorOverlay?.getElement();
+  const overlayEl = activeFloorOverlay()?.getElement();
   if (overlayEl) overlayEl.style.cursor = 'grabbing';
 
   L.DomEvent.on(document, 'mousemove', onOverlayMouseMove);
@@ -426,7 +493,7 @@ function onOverlayMouseMove(e) {
     now.lng - overlayDrag.startLatLng.lng,
   );
   writeInputs(next);
-  ensureOverlay(next);
+  ensureOverlay(activeOverlayId.value, next);
   syncCalibHandles(next);
 }
 
@@ -438,9 +505,10 @@ function onOverlayMouseUp() {
 
 function bindOverlayDrag() {
   unbindOverlayDrag();
-  if (!floorOverlay) return;
-  floorOverlay.setMoveable(true);
-  const el = floorOverlay.getElement();
+  const layer = activeFloorOverlay();
+  if (!layer) return;
+  layer.setMoveable(true);
+  const el = layer.getElement();
   if (!el) return;
   L.DomEvent.on(el, 'mousedown', onOverlayMouseDown);
   L.DomEvent.on(el, 'touchstart', onOverlayMouseDown);
@@ -448,13 +516,14 @@ function bindOverlayDrag() {
 
 function unbindOverlayDrag() {
   stopOverlayDrag();
-  if (!floorOverlay) return;
-  const el = floorOverlay.getElement();
+  const layer = activeFloorOverlay();
+  if (!layer) return;
+  const el = layer.getElement();
   if (el) {
     L.DomEvent.off(el, 'mousedown', onOverlayMouseDown);
     L.DomEvent.off(el, 'touchstart', onOverlayMouseDown);
   }
-  floorOverlay.setMoveable(false);
+  layer.setMoveable(false);
 }
 
 function fitToOverlay(bounds, { padding = [8, 8], maxZoom = 22, zoomBoost = 0 } = {}) {
@@ -471,6 +540,17 @@ function fitToOverlay(bounds, { padding = [8, 8], maxZoom = 22, zoomBoost = 0 } 
       map.setZoom(nextZoom, { animate: false });
     }
   }
+}
+
+function fitToAllOverlays({ padding = [28, 28], maxZoom = 22 } = {}) {
+  const points = unionLatLngs(visibleBoundsList());
+  if (points.length === 0) return;
+  map.invalidateSize();
+  map.fitBounds(L.latLngBounds(points), {
+    padding,
+    maxZoom,
+    animate: false,
+  });
 }
 
 function syncCalibHandles(bounds) {
@@ -516,7 +596,7 @@ function syncCalibHandles(bounds) {
       normalizeRotation(rotation.value),
     );
     writeInputs(next);
-    ensureOverlay(next);
+    ensureOverlay(activeOverlayId.value, next);
     moveMarker.setLatLng(overlayCenter(next));
   };
 
@@ -541,7 +621,7 @@ function syncCalibHandles(bounds) {
       now.lng - moveDragStart.center.lng,
     );
     writeInputs(next);
-    ensureOverlay(next);
+    ensureOverlay(activeOverlayId.value, next);
     swMarker.setLatLng(overlayCorners(next).bottomLeft);
     neMarker.setLatLng(overlayCorners(next).topRight);
   });
@@ -553,12 +633,16 @@ function syncCalibHandles(bounds) {
 }
 
 function applyOverlayVisual() {
-  if (!floorOverlay) return;
+  for (const plan of FLOORPLANS) {
+    const layer = floorOverlays.get(plan.id);
+    if (!layer) continue;
 
-  if (mapMode.value === 'floor') {
-    floorOverlay.setOpacity(1);
-  } else if (mapMode.value === 'calibrate') {
-    floorOverlay.setOpacity(overlayOpacity.value);
+    if (mapMode.value === 'floor') {
+      layer.setOpacity(1);
+    } else if (mapMode.value === 'calibrate') {
+      const isActive = plan.id === activeOverlayId.value;
+      layer.setOpacity(isActive ? overlayOpacity.value : Math.min(0.35, overlayOpacity.value));
+    }
   }
 }
 
@@ -579,7 +663,7 @@ function showBaseLayerControl(show) {
   }
 }
 
-function applyMode() {
+function applyMode({ fitView = false } = {}) {
   if (!map) return;
 
   const bounds = currentOverlayBounds();
@@ -596,15 +680,12 @@ function applyMode() {
     setBaseMapOpacity(1);
     showBaseLayerControl(true);
     removeCalibHandles();
-    removeOverlay();
+    removeAllOverlays();
     map.setMaxZoom(20);
     return;
   }
 
-  ensureOverlay(bounds);
-  if (!map.hasLayer(floorOverlay)) {
-    floorOverlay.addTo(map);
-  }
+  ensureAllOverlays();
   applyOverlayVisual();
   map.setMaxZoom(22);
 
@@ -614,15 +695,20 @@ function applyMode() {
     showBaseLayerControl(true);
     syncCalibHandles(bounds);
     bindOverlayDrag();
-    fitToOverlay(bounds, { padding: [40, 40], maxZoom: 19, zoomBoost: 0 });
+    // Fit hanya saat masuk mode / ganti gedung — bukan tiap auto-save
+    if (fitView) {
+      fitToOverlay(bounds, { padding: [40, 40], maxZoom: 19, zoomBoost: 0 });
+    }
     return;
   }
 
   setBaseMapOpacity(0);
   showBaseLayerControl(false);
   removeCalibHandles();
-  floorOverlay?.setMoveable(false);
-  applyFloorView(bounds);
+  for (const layer of floorOverlays.values()) {
+    layer.setMoveable?.(false);
+  }
+  applyFloorView();
   bindFloorViewPersist();
 }
 
@@ -630,9 +716,13 @@ function persistCalibration(showNote) {
   const bounds = readInputs();
   if (!bounds) return;
 
-  sharedBounds = bounds;
-  saveBounds(bounds);
-  ensureOverlay(bounds);
+  const id = activeOverlayId.value;
+  sharedBoundsMap = {
+    ...sharedBoundsMap,
+    [id]: bounds,
+  };
+  cacheBoundsMap();
+  ensureOverlay(id, bounds);
   if (mapMode.value === 'calibrate') {
     syncCalibHandles(bounds);
   }
@@ -644,14 +734,13 @@ function persistCalibration(showNote) {
   }
 
   if (showNote) {
-    pushBoundsToServer(bounds, { notify: true });
+    pushBoundsToServer(sharedBoundsMap, { notify: true });
     return;
   }
 
-  // Auto-simpan (geser/putar) — debounce agar tidak spam API
   serverSaveTimer = setTimeout(() => {
     serverSaveTimer = null;
-    pushBoundsToServer(bounds, { notify: false });
+    pushBoundsToServer(sharedBoundsMap, { notify: false });
   }, 700);
 }
 
@@ -665,13 +754,20 @@ async function resetCalibration() {
     serverSaveTimer = null;
   }
 
-  sharedBounds = null;
-  clearBounds();
+  const id = activeOverlayId.value;
+  const next = { ...sharedBoundsMap };
+  delete next[id];
+  sharedBoundsMap = next;
+  cacheBoundsMap();
 
   if (props.isAdmin && props.adminToken) {
     try {
-      await clearFactoryBoundsRemote(props.adminToken);
-      showSaveNote('Kalibrasi direset di semua komputer');
+      if (Object.keys(sharedBoundsMap).length === 0) {
+        await clearFactoryBoundsRemote(props.adminToken);
+      } else {
+        await saveFactoryBoundsApi(props.adminToken, sharedBoundsMap);
+      }
+      showSaveNote(`Kalibrasi ${getFloorplan(id).label} direset`);
     } catch (error) {
       showSaveNote(error.message || 'Gagal reset di server');
     }
@@ -682,10 +778,51 @@ async function resetCalibration() {
   applyMode();
 }
 
+function selectOverlay(overlayId) {
+  if (!FLOORPLANS.some((plan) => plan.id === overlayId)) return;
+  if (activeOverlayId.value === overlayId) return;
+
+  unbindOverlayDrag();
+  removeCalibHandles();
+  activeOverlayId.value = overlayId;
+  overlayVisible.value = {
+    ...overlayVisible.value,
+    [overlayId]: true,
+  };
+
+  if (mapMode.value === 'calibrate') {
+    applyMode({ fitView: true });
+  } else if (mapMode.value === 'floor') {
+    applyMode();
+  }
+}
+
+function setOverlayVisible(overlayId, visible) {
+  overlayVisible.value = {
+    ...overlayVisible.value,
+    [overlayId]: visible,
+  };
+  if (mapMode.value === 'osm') return;
+
+  if (!visible && activeOverlayId.value === overlayId) {
+    const next = FLOORPLANS.find((plan) => overlayVisible.value[plan.id] !== false);
+    if (next) {
+      activeOverlayId.value = next.id;
+    }
+  }
+
+  // Toggle tampil: jangan loncatkan kamera
+  applyMode({ fitView: false });
+}
+
+function toggleOverlayVisible(overlayId) {
+  setOverlayVisible(overlayId, overlayVisible.value[overlayId] === false);
+}
+
 function onInputBounds() {
   const bounds = readInputs();
-  if (!bounds || !floorOverlay) return;
-  ensureOverlay(bounds);
+  if (!bounds || !activeFloorOverlay()) return;
+  ensureOverlay(activeOverlayId.value, bounds);
   if (mapMode.value === 'calibrate') {
     syncCalibHandles(bounds);
   }
@@ -709,13 +846,22 @@ function setMode(mode) {
   if (!props.isAdmin && mode === 'calibrate') return;
   mapMode.value = mode;
   localStorage.setItem(MAP_MODE_KEY, mode);
-  applyMode();
+  applyMode({ fitView: mode === 'calibrate' });
   nextTick(() => {
     map?.invalidateSize();
     if (mode === 'floor') {
-      applyFloorView(currentOverlayBounds());
+      applyFloorView();
       bindFloorViewPersist();
     }
+  });
+}
+
+function cornerIcon(label) {
+  return L.divIcon({
+    className: '',
+    html: `<div class="calib-pin">${label}</div>`,
+    iconSize: [40, 28],
+    iconAnchor: [20, 14],
   });
 }
 
@@ -978,7 +1124,7 @@ onUnmounted(() => {
     map = null;
   }
   osmLayer = null;
-  floorOverlay = null;
+  floorOverlays.clear();
   baseMapLayers = [];
   esriHybridGroup = null;
   osmStreetLayer = null;
@@ -990,9 +1136,14 @@ onUnmounted(() => {
 
 defineExpose({
   applyRemoteBounds(bounds) {
+    // Saat kalibrasi di PC ini, abaikan echo socket dari auto-save sendiri
+    // (itu penyebab peta "refresh" terus saat digeser).
+    if (mapMode.value === 'calibrate') {
+      return;
+    }
     applyingRemote = true;
     try {
-      applySharedBounds(bounds, { refreshView: true });
+      applySharedBoundsMap(bounds, { refreshView: true });
     } finally {
       applyingRemote = false;
     }
@@ -1020,16 +1171,45 @@ defineExpose({
     </div>
 
     <aside v-if="mapMode === 'calibrate'" class="calibrate-panel">
-      <p>Tarik denah atau tombol <strong>GESER</strong> untuk pindah posisi. SW/NE untuk ukuran, Putar untuk sudut.</p>
+      <p>
+        Pilih gedung, lalu tarik denah atau <strong>GESER</strong>. SW/NE untuk ukuran, Putar untuk
+        sudut. Setiap gedung punya kalibrasi sendiri.
+      </p>
+
+      <div class="overlay-picker">
+        <span class="overlay-picker-label">Denah aktif</span>
+        <div class="overlay-picker-list">
+          <button
+            v-for="plan in floorplans"
+            :key="plan.id"
+            type="button"
+            class="overlay-chip"
+            :class="{ active: activeOverlayId === plan.id }"
+            @click="selectOverlay(plan.id)"
+          >
+            {{ plan.label }}
+          </button>
+        </div>
+        <div class="overlay-vis-list">
+          <label v-for="plan in floorplans" :key="`vis-${plan.id}`" class="overlay-vis">
+            <input
+              type="checkbox"
+              :checked="overlayVisible[plan.id] !== false"
+              @change="setOverlayVisible(plan.id, $event.target.checked)"
+            />
+            Tampilkan {{ plan.label }}
+          </label>
+        </div>
+      </div>
 
       <label class="opacity-row">
-        Transparansi denah
+        Transparansi denah aktif
         <input v-model.number="overlayOpacity" type="range" min="0.2" max="1" step="0.05" />
       </label>
 
       <div class="rotate-block">
         <div class="rotate-head">
-          <span>Putar denah</span>
+          <span>Putar {{ floorplans.find((p) => p.id === activeOverlayId)?.label || 'denah' }}</span>
           <strong>{{ Number(rotation).toFixed(1) }}°</strong>
         </div>
         <div class="rotate-row">
@@ -1074,7 +1254,7 @@ defineExpose({
 
       <div class="calib-actions">
         <button type="button" class="save" @click="saveCalibration">Simpan</button>
-        <button type="button" class="reset" @click="resetCalibration">Reset</button>
+        <button type="button" class="reset" @click="resetCalibration">Reset denah ini</button>
       </div>
       <small v-if="saveNote">{{ saveNote }}</small>
     </aside>
@@ -1149,6 +1329,56 @@ defineExpose({
   font-size: 0.8rem;
   line-height: 1.4;
   color: var(--muted);
+}
+
+.overlay-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.overlay-picker-label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.overlay-picker-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+}
+
+.overlay-chip {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.35rem 0.65rem;
+  background: #fff;
+  color: var(--muted);
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.overlay-chip.active {
+  border-color: #2563eb;
+  background: #eff6ff;
+  color: #1d4ed8;
+  font-weight: 600;
+}
+
+.overlay-vis-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.overlay-vis {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+  cursor: pointer;
 }
 
 .opacity-row,
