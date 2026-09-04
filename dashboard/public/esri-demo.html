@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="id">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Contoh Citra Esri (Leaflet)</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+    />
+    <style>
+      :root {
+        --text: #0f172a;
+        --muted: #64748b;
+        --blue: #0576ee;
+        --border: #e2e8f0;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        color: var(--text);
+        background: #f1f5f9;
+      }
+      header {
+        padding: 0.9rem 1.1rem;
+        background: #fff;
+        border-bottom: 1px solid var(--border);
+      }
+      header h1 {
+        margin: 0;
+        font-size: 1.1rem;
+      }
+      header p {
+        margin: 0.35rem 0 0;
+        color: var(--muted);
+        font-size: 0.88rem;
+      }
+      .toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        padding: 0.75rem 1.1rem;
+        background: #fff;
+        border-bottom: 1px solid var(--border);
+      }
+      button {
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 0.45rem 0.9rem;
+        background: #fff;
+        color: var(--text);
+        font-weight: 600;
+        cursor: pointer;
+      }
+      button.active {
+        background: var(--blue);
+        border-color: var(--blue);
+        color: #fff;
+      }
+      #map {
+        height: calc(100vh - 120px);
+        width: 100%;
+      }
+      .note {
+        position: absolute;
+        z-index: 1000;
+        left: 12px;
+        bottom: 12px;
+        max-width: min(360px, calc(100vw - 24px));
+        padding: 0.7rem 0.85rem;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.95);
+        border: 1px solid var(--border);
+        font-size: 0.8rem;
+        color: var(--muted);
+        line-height: 1.45;
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Contoh: Citra satelit Esri di Leaflet</h1>
+      <p>
+        Lokasi perkiraan PT Gistex (kalibrasi Anda). Ini hanya demo — belum mengganti
+        dashboard utama.
+      </p>
+    </header>
+
+    <div class="toolbar">
+      <button type="button" class="active" data-layer="esri">Citra Esri</button>
+      <button type="button" data-layer="hybrid">Citra + label jalan</button>
+      <button type="button" data-layer="osm">Peta OSM (sekarang)</button>
+    </div>
+
+    <div id="map"></div>
+    <div class="note">
+      <strong>Esri World Imagery</strong> = foto udara/satelit (mirip Google Satellite).<br />
+      Bandingkan tombol di atas. Kalau cocok, mode ini bisa ditambahkan ke dashboard.
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+      // Titik tengah dari factory-bounds di PC Anda
+      const center = [-6.75365, 108.205771];
+
+      const map = L.map('map', { zoomControl: true }).setView(center, 17);
+
+      const osm = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '&copy; OpenStreetMap',
+      });
+
+      // Esri World Imagery (gratis untuk banyak penggunaan non-komersial/internal — cek ToS Esri)
+      const esri = L.tileLayer(
+        'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+        {
+          maxZoom: 19,
+          attribution: 'Tiles &copy; Esri',
+        },
+      );
+
+      const labels = L.tileLayer(
+        'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
+        {
+          maxZoom: 19,
+          opacity: 0.9,
+          attribution: 'Labels &copy; Esri',
+        },
+      );
+
+      let roads = null;
+
+      esri.addTo(map);
+      L.marker(center).addTo(map).bindPopup('Perkiraan area pabrik (demo)').openPopup();
+
+      const buttons = document.querySelectorAll('.toolbar button');
+
+      function setActive(layerName) {
+        buttons.forEach((btn) => {
+          btn.classList.toggle('active', btn.dataset.layer === layerName);
+        });
+      }
+
+      function clearBase() {
+        map.removeLayer(osm);
+        map.removeLayer(esri);
+        if (roads) {
+          map.removeLayer(roads);
+          roads = null;
+        }
+        map.removeLayer(labels);
+      }
+
+      buttons.forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const layer = btn.dataset.layer;
+          clearBase();
+          setActive(layer);
+
+          if (layer === 'osm') {
+            osm.addTo(map);
+            return;
+          }
+
+          esri.addTo(map);
+          if (layer === 'hybrid') {
+            // Label nama tempat Esri (bukan label Google)
+            labels.addTo(map);
+            roads = L.tileLayer(
+              'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}',
+              { maxZoom: 19, opacity: 0.85 },
+            ).addTo(map);
+          }
+        });
+      });
+    </script>
+  </body>
+</html>

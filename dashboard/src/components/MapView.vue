@@ -58,6 +58,13 @@ const defaultCenter = [-6.2, 106.816666];
 
 let map = null;
 let osmLayer = null;
+/** Layer dasar: Esri hybrid + OSM street */
+let baseMapLayers = [];
+let esriHybridGroup = null;
+let osmStreetLayer = null;
+let baseLayerControl = null;
+let baseLayerControlOnMap = false;
+
 let floorOverlay = null;
 let swMarker = null;
 let neMarker = null;
@@ -71,6 +78,7 @@ const markerAnimations = new Map();
 const MARKER_ANIM_MS = 900;
 const MAP_MODE_KEY = 'live_tracking_map_mode';
 const FLOOR_VIEW_KEY = 'live_tracking_floor_view';
+const BASE_STYLE_KEY = 'live_tracking_base_style';
 
 let floorViewBound = false;
 let saveViewTimer = null;
@@ -554,6 +562,23 @@ function applyOverlayVisual() {
   }
 }
 
+function setBaseMapOpacity(opacity) {
+  baseMapLayers.forEach((layer) => {
+    layer.setOpacity?.(opacity);
+  });
+}
+
+function showBaseLayerControl(show) {
+  if (!map || !baseLayerControl) return;
+  if (show && !baseLayerControlOnMap) {
+    baseLayerControl.addTo(map);
+    baseLayerControlOnMap = true;
+  } else if (!show && baseLayerControlOnMap) {
+    map.removeControl(baseLayerControl);
+    baseLayerControlOnMap = false;
+  }
+}
+
 function applyMode() {
   if (!map) return;
 
@@ -568,10 +593,11 @@ function applyMode() {
 
   if (mapMode.value === 'osm') {
     unbindFloorViewPersist();
-    osmLayer?.setOpacity(1);
+    setBaseMapOpacity(1);
+    showBaseLayerControl(true);
     removeCalibHandles();
     removeOverlay();
-    map.setMaxZoom(19);
+    map.setMaxZoom(20);
     return;
   }
 
@@ -584,14 +610,16 @@ function applyMode() {
 
   if (mapMode.value === 'calibrate') {
     unbindFloorViewPersist();
-    osmLayer?.setOpacity(1);
+    setBaseMapOpacity(1);
+    showBaseLayerControl(true);
     syncCalibHandles(bounds);
     bindOverlayDrag();
     fitToOverlay(bounds, { padding: [40, 40], maxZoom: 19, zoomBoost: 0 });
     return;
   }
 
-  osmLayer?.setOpacity(0);
+  setBaseMapOpacity(0);
+  showBaseLayerControl(false);
   removeCalibHandles();
   floorOverlay?.setMoveable(false);
   applyFloorView(bounds);
@@ -700,10 +728,68 @@ function ensureMap() {
 
   L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-  osmLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  const esriImagery = L.tileLayer(
+    'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    {
+      // Esri sering kosong di z19 untuk banyak area Indo → pakai tile z18 lalu di-scale
+      maxZoom: 22,
+      maxNativeZoom: 18,
+      attribution: 'Tiles &copy; Esri',
+    },
+  );
+  const esriLabels = L.tileLayer(
+    'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
+    {
+      maxZoom: 22,
+      maxNativeZoom: 18,
+      opacity: 0.95,
+      attribution: 'Labels &copy; Esri',
+    },
+  );
+  const esriRoads = L.tileLayer(
+    'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}',
+    {
+      maxZoom: 22,
+      maxNativeZoom: 18,
+      opacity: 0.9,
+      attribution: 'Roads &copy; Esri',
+    },
+  );
+
+  esriHybridGroup = L.layerGroup([esriImagery, esriLabels, esriRoads]);
+  osmStreetLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
     attribution: '&copy; OpenStreetMap contributors',
-  }).addTo(map);
+  });
+
+  baseMapLayers = [esriImagery, esriLabels, esriRoads, osmStreetLayer];
+  osmLayer = esriImagery;
+
+  // Default: OSM. Hanya pakai citra jika user pernah memilihnya.
+  const preferEsri = localStorage.getItem(BASE_STYLE_KEY) === 'esri';
+  if (preferEsri) {
+    esriHybridGroup.addTo(map);
+  } else {
+    osmStreetLayer.addTo(map);
+  }
+
+  baseLayerControl = L.control.layers(
+    {
+      OSM: osmStreetLayer,
+      'Citra + label': esriHybridGroup,
+    },
+    {},
+    { position: 'topright', collapsed: false },
+  );
+
+  map.on('baselayerchange', (event) => {
+    const style = event.name === 'OSM' ? 'osm' : 'esri';
+    localStorage.setItem(BASE_STYLE_KEY, style);
+  });
+
+  if (mapMode.value === 'osm' || mapMode.value === 'calibrate') {
+    showBaseLayerControl(true);
+  }
 
   if (typeof ResizeObserver !== 'undefined' && mapElement.value) {
     mapResizeObserver = new ResizeObserver(() => {
@@ -893,6 +979,11 @@ onUnmounted(() => {
   }
   osmLayer = null;
   floorOverlay = null;
+  baseMapLayers = [];
+  esriHybridGroup = null;
+  osmStreetLayer = null;
+  baseLayerControl = null;
+  baseLayerControlOnMap = false;
   markerAnimations.forEach((_, userId) => stopMarkerAnimation(userId));
   markers.clear();
 });
@@ -913,7 +1004,7 @@ defineExpose({
   <div class="map-shell">
     <div class="map-toolbar">
       <button type="button" :class="{ active: mapMode === 'osm' }" @click="setMode('osm')">
-        Peta
+        Citra
       </button>
       <button type="button" :class="{ active: mapMode === 'floor' }" @click="setMode('floor')">
         Denah pabrik
